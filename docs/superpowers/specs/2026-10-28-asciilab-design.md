@@ -136,9 +136,9 @@ validates before calling, so the throw is a programming-error guard, not a UX pa
 |---|---|---|
 | Geometry | `geometry.ts` | `rows = round(cols * (frame.height / frame.width) * cellAspect)`, min 1. Subcell grid per mode: tone/edge 1×1, braille 2×4, blocks half 1×2 / quadrant 2×2 / sextant 2×3, glyph 4×8. |
 | Resample | `sample.ts` | Area-average each subcell from source pixels in **linear light** (sRGB → linear LUT, 256 entries). Outputs per-subcell linear RGB + alpha. Alpha composited against `background` (dark = #000, light = #fff, transparent = kept, flag bit0 set when alpha < 0.5). |
-| Tone | `tone.ts` | Luma (709: 0.2126/0.7152/0.0722; 601: 0.299/0.587/0.114) on linear RGB → apply contrast (around 0.5), brightness (offset), gamma (`pow`), invert, clamp 0..1. `background === 'light'` flips the ramp direction (lightest glyph = darkest luma) instead of inverting the image. |
+| Tone | `tone.ts` | Luma (709: 0.2126/0.7152/0.0722; 601: 0.299/0.587/0.114) on linear RGB → apply contrast (around 0.5), brightness (offset), gamma (`pow`), clamp 0..1. **`invert` and `background === 'light'` are NOT applied here**; they combine into one `flip = invert !== (background === 'light')` applied after quantization (tone/edge: ramp index `i → n-1-i`; braille/blocks: on/off bit flip; glyph: `s → 1-s` on the match target). This makes `invert` an exact involution regardless of rounding. |
 | Dither | `dither.ts` | Operates on the tone value before quantization to ramp index. Bayer 2/4/8 threshold matrices; `noise` = seeded hash per cell (temporally stable); Floyd-Steinberg and Atkinson error diffusion across cells in scan order. `ditherStrength` scales the perturbation. |
-| Ramp | `ramps.ts` | Presets: `standard` (`" .:-=+*#%@"`), `long70` (classic 70-char), `blocks` (`" ░▒▓█"`), `minimal` (`" .oO@"`), `binary` (`" #"`). `calibrateRamp(glyphs, coverage: Map<string, number>)` sorts glyphs by measured ink coverage; coverage is measured by the host (web: offscreen canvas; CLI: precomputed table for DejaVu Sans Mono shipped in `data/coverage.json`). Uncalibrated custom ramps are used in the order given. |
+| Ramp | `ramps.ts` | Presets: `standard` (`" .:-=+*#%@"`), `long70` (classic 70-char), `blocks` (`" ░▒▓█"`), `minimal` (`" .oO@"`), `binary` (`" #"`). `calibrateRamp(glyphs: string, coverage: Record<number, number>): string` (codepoint → ink fraction 0..1) sorts glyphs ascending by coverage, drops glyphs missing from `coverage`, dedupes, ties by lowest codepoint, returns the input unchanged if fewer than 2 glyphs survive. Coverage is measured by the host (web: offscreen canvas; CLI: precomputed table for DejaVu Sans Mono shipped in `data/coverage.json`). Uncalibrated custom ramps are used in the order given. |
 | Mode: tone | `modes/tone.ts` | `glyph = ramp[round(tone * (ramp.length - 1))]`. |
 | Mode: edge | `modes/edge.ts` | Sobel on the per-cell tone field (3×3). Magnitude ≥ `edgeThreshold` → directional glyph by orientation bucket: `-` (0°), `/` (45°), `\|` (90°), `\` (135°), with `_` for strong horizontal at bottom-weighted cells. Below threshold → tone glyph for `tone * edgeBlend` (non-edge regions are dimmed so edges stand out; `edgeBlend = 0` gives pure line art). |
 | Mode: braille | `modes/braille.ts` | 2×4 subcells each thresholded (after dither) to a dot; codepoint = `0x2800 + bitmask` using the standard dot order (1,2,3,7 left column; 4,5,6,8 right). Empty cell = `0x2800` (not space) so columns align. |
@@ -149,12 +149,16 @@ validates before calling, so the throw is a programming-error guard, not a UX pa
 
 ### 3.3 Serializers (`src/serialize/`)
 
+`CellBuffer` carries colors but not the `colorMode` it was rendered with, so every colored
+serializer takes `colorMode` (default `'fg+bg'`) and emits only what that mode allows.
+Transparent cells (flags bit0) emit no color.
+
 | Output | Function | Notes |
 |---|---|---|
-| Plain text | `toText(cells): string` | Glyphs only, `\n` rows, trailing spaces trimmed per row unless `keepTrailing`. |
-| ANSI | `toAnsi(cells, { depth }): string` | 16-color: SGR 30–37/90–97 (fg) and 40–47/100–107 (bg); 256: `38;5;n` / `48;5;n`; truecolor: `38;2;r;g;b` / `48;2;r;g;b`. SGR emitted only when fg/bg change from the previous cell; `\x1b[0m` at row end. |
-| HTML | `toHtml(cells, { inline: boolean }): string` | `<pre class="asciilab">` with one `<span style="color:..;background:..">` per run of identical colors. Escapes `<`, `>`, `&`. `inline: false` emits classes + a `<style>` block instead of inline styles. |
-| SVG | `toSvg(cells, { fontFamily, fontSize, cellW, cellH, background }): string` | One `<rect>` per bg run, one `<text>` per fg run with `xml:space="preserve"` and `textLength` for exact column alignment. Host supplies measured `cellW/cellH`. |
+| Plain text | `toText(cells, { keepTrailing?: boolean }): string` | Glyphs only, `\n` rows, trailing ASCII spaces trimmed per row unless `keepTrailing`. |
+| ANSI | `toAnsi(cells, { depth: ColorDepth; colorMode?: ColorMode }): string` | 16-color: SGR 30–37/90–97 (fg) and 40–47/100–107 (bg); 256: `38;5;n` / `48;5;n`; truecolor: `38;2;r;g;b` / `48;2;r;g;b`. SGR emitted only when fg/bg change from the previous cell; `\x1b[0m` at row end only if any SGR was emitted in that row. Stripping all SGR yields `toText(cells, { keepTrailing: true })`. |
+| HTML | `toHtml(cells, { inline?: boolean; colorMode?: ColorMode }): string` | `<pre class="asciilab">` with one `<span style="color:..;background:..">` per run of identical colors. Escapes `<`, `>`, `&`. `inline: false` emits classes + a `<style>` block instead of inline styles. `colorMode: 'none'` emits no spans. |
+| SVG | `toSvg(cells, { fontFamily: string; fontSize: number; cellW: number; cellH: number; background: Background; colorMode?: ColorMode }): string` | One `<rect>` per bg run, one `<text>` per fg run with `xml:space="preserve"` and `textLength` for exact column alignment. Host supplies measured `cellW/cellH`. `background: 'transparent'` omits the page rect. |
 
 PNG is **not** in the engine (needs a canvas). Web: `apps/web/src/export/rasterize.ts` draws
 the cell buffer to an `OffscreenCanvas` using measured metrics and `devicePixelRatio`. CLI:
@@ -166,10 +170,12 @@ the cell buffer to an `OffscreenCanvas` using measured metrics and `devicePixelR
   comment lines, print direction, full layout, codetag count), character table for ASCII 32–126
   plus German umlauts, code-tagged extra characters. Rejects compressed `.flf` (zip) with a
   clear error; the bundler pre-extracts.
-- `renderFiglet(text, font, { layout: 'full' | 'fitted' | 'smushed' | 'controlled', width?, align })`
-  implementing the six horizontal smushing rules and vertical layout per `figfont.txt`. Lines
-  longer than `width` wrap at word boundaries. Returns `string[]` (lines) and a `CellBuffer`
-  adapter (`figletToCells`) so the same exports apply.
+- `renderFiglet(text, font, { layout?: 'full' | 'fitted' | 'smushed' | 'controlled'; width?: number; align?: 'left' | 'center' | 'right' }): string[]`
+  implementing the six horizontal smushing rules and vertical layout per `figfont.txt`.
+  Defaults: `layout: 'controlled'` (the font's own layout), `width: 80`, `align: 'left'`. Lines
+  longer than `width` wrap at word boundaries. Hardblanks are replaced by spaces in the output.
+- `figletToCells(lines: string[]): CellBuffer` — cols = longest line, rows = lines.length, glyphs
+  from the lines (short lines padded with spaces), fg/bg zero, flags zero. Same exports apply.
 - Bundled fonts (public domain / FIGlet-distributed, verified before inclusion): `standard`,
   `slant`, `small`, `big`, `banner`, `block`, `shadow`, `script`, `mini`, `digital`. Stored as
   `.flf` text imported as strings; ~150 KB total.
@@ -193,7 +199,7 @@ Exports: `render`, `DEFAULT_OPTIONS`, all types, `RAMPS`, `calibrateRamp`, `toTe
 
 ### 4.1 Stack
 
-Vite 7, React 19, TypeScript 5.9 (strict), Tailwind CSS v4, Zustand (state), Zod v4 `zod/mini`
+Vite 7.x, React 19, TypeScript 5.9.x (strict; not the TS 7 native preview), Tailwind CSS v4, Zustand (state), Zod v4 `zod/mini`
 (URL-state schema), Vite `?worker` module worker. No UI component library; custom components
 with Radix primitives only where accessibility is hard (slider, select, tabs, dialog). Fonts:
 a bundled monospace (JetBrains Mono, OFL) as the default preview font, plus system monospace
@@ -214,7 +220,11 @@ Three regions, responsive (stacked under 900 px):
 2. **Output** (center, flexible): `<pre id="output">` whose `innerHTML`/`textContent` is set
    imperatively from `toHtml`/`toText` — React does not reconcile cells. Pan/zoom via CSS
    `font-size` slider (8–24 px) and native scroll. Live status line: "160 × 72 cells · tone ·
-   14 ms". Empty state shows a demo image (bundled, 1 click to load).
+   14 ms". On first visit to `/` the bundled demo image is auto-loaded so the hero is never
+   blank; after "Clear" the empty state shows a "Load demo image" button. The demo image is
+   **generated procedurally** by a committed script (`apps/web/scripts/gen-fixtures.ts`: 800×533
+   scene with gradient sky, shaded sphere, horizon) so there is no photo licensing question;
+   the same script emits the Playwright fixtures.
 3. **Controls** (right, 320 px): grouped sections in this order — Mode · Size (columns, cell
    aspect auto/manual) · Characters (ramp preset / custom / calibrate toggle) · Tone (invert,
    brightness, contrast, gamma, background) · Dither (kind, strength) · Color (mode, depth) ·
@@ -257,8 +267,9 @@ show notice) → Frame (RGBA via OffscreenCanvas.getImageData) → postMessage t
 ### 4.6 Privacy guarantee (verifiable)
 
 - No backend. CSP (via `_headers`): `default-src 'self'; img-src 'self' data: blob: https:;
-  connect-src 'self' https://static.cloudflareinsights.com; worker-src 'self'; script-src
-  'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'`.
+  connect-src 'self' https://cloudflareinsights.com; worker-src 'self'; script-src
+  'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'` (the beacon
+  script loads from `static.cloudflareinsights.com` and POSTs to `cloudflareinsights.com`).
   `img-src https:` exists only so the URL input can load a user-supplied image via
   `<img crossorigin="anonymous">`; `connect-src` stays strict so no code path can POST bytes.
 - Playwright test (analytics disabled) intercepts all requests after initial load, drops an
@@ -372,7 +383,7 @@ asciilab/
 ├── README.md  LICENSE  CONTRIBUTING.md  CODE_OF_CONDUCT.md  SECURITY.md
 ```
 
-Tooling: pnpm 10 workspaces; Biome 2 (lint + format); TypeScript strict with
+Tooling: pnpm 10.x workspaces (installed via `npm i -g pnpm@10`; Node 26 ships without corepack); Biome 2 (lint + format); TypeScript strict with
 `noUncheckedIndexedAccess`; `tsdown` builds the two publishable packages (ESM, `.d.ts`);
 Changesets for versioning and changelogs; Node ≥ 22 engines field.
 
@@ -406,7 +417,10 @@ Changesets for versioning and changelogs; Node ≥ 22 engines field.
 - **Privacy**: route-intercept all requests; assert none after load except static assets.
 - Keyboard: tab order reaches every control; shortcuts act; `?` opens help.
 - Axe accessibility scan on `/`, `/text`, `/privacy` with zero serious/critical violations.
-- 3 screenshot snapshots (empty state, rendered tone, rendered glyph with color) at 1280 px,
+- 3 screenshot snapshots (empty state, rendered tone, rendered glyph with color) at 1280 px
+  (baselines are platform-specific; they are generated on Linux in CI with
+  `updateSnapshots: 'missing'` on the first run, downloaded from the artifact, and committed;
+  the visual spec is skipped on non-Linux hosts),
   dark theme, 0.5 % pixel tolerance.
 
 ### 7.3 CLI (Vitest, spawning the built binary)
