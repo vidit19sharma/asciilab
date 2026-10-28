@@ -152,7 +152,7 @@ validates before calling, so the throw is a programming-error guard, not a UX pa
 | Output | Function | Notes |
 |---|---|---|
 | Plain text | `toText(cells): string` | Glyphs only, `\n` rows, trailing spaces trimmed per row unless `keepTrailing`. |
-| ANSI | `toAnsi(cells, { depth }): string` | SGR 38/48 (`;5;n` for 16/256, `;2;r;g;b` for truecolor), emitted only when fg/bg change from the previous cell, `\x1b[0m` at row end. 16-color uses 30–37/90–97. |
+| ANSI | `toAnsi(cells, { depth }): string` | 16-color: SGR 30–37/90–97 (fg) and 40–47/100–107 (bg); 256: `38;5;n` / `48;5;n`; truecolor: `38;2;r;g;b` / `48;2;r;g;b`. SGR emitted only when fg/bg change from the previous cell; `\x1b[0m` at row end. |
 | HTML | `toHtml(cells, { inline: boolean }): string` | `<pre class="asciilab">` with one `<span style="color:..;background:..">` per run of identical colors. Escapes `<`, `>`, `&`. `inline: false` emits classes + a `<style>` block instead of inline styles. |
 | SVG | `toSvg(cells, { fontFamily, fontSize, cellW, cellH, background }): string` | One `<rect>` per bg run, one `<text>` per fg run with `xml:space="preserve"` and `textLength` for exact column alignment. Host supplies measured `cellW/cellH`. |
 
